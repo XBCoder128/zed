@@ -1277,3 +1277,49 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// ── Blur compute shaders ──
+
+// Horizontal Gaussian blur pass
+kernel void gaussian_blur_horizontal(
+    texture2d<float, access::read>  inTexture  [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    constant float &sigma [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int radius = int(ceil(3.0 * sigma));
+    float weightSum = 0.0;
+    float4 result = float4(0.0);
+
+    for (int x = -radius; x <= radius; x++) {
+        float weight = exp(-float(x * x) / (2.0 * sigma * sigma));
+        int2 sampleCoord = int2(int(gid.x) + x, int(gid.y));
+        sampleCoord.x = clamp(sampleCoord.x, 0, int(inTexture.get_width()) - 1);
+        result += weight * inTexture.read(uint2(sampleCoord));
+        weightSum += weight;
+    }
+
+    outTexture.write(result / weightSum, gid);
+}
+
+// Vertical Gaussian blur pass
+kernel void gaussian_blur_vertical(
+    texture2d<float, access::read>  inTexture  [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    constant float &sigma [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    int radius = int(ceil(3.0 * sigma));
+    float weightSum = 0.0;
+    float4 result = float4(0.0);
+
+    for (int y = -radius; y <= radius; y++) {
+        float weight = exp(-float(y * y) / (2.0 * sigma * sigma));
+        int2 sampleCoord = int2(int(gid.x), int(gid.y) + y);
+        sampleCoord.y = clamp(sampleCoord.y, 0, int(inTexture.get_height()) - 1);
+        result += weight * inTexture.read(uint2(sampleCoord));
+        weightSum += weight;
+    }
+
+    outTexture.write(result / weightSum, gid);
+}

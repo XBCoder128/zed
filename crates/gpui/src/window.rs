@@ -2,7 +2,7 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
+    AsyncWindowContext, AvailableSpace, Background, BlurRegion, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
@@ -3818,6 +3818,20 @@ impl Window {
                 pad: 0,
             });
         }
+    }
+
+    /// Push a blur region into the scene — captures and blurs the current drawable content
+    /// behind the given bounds. Use this for backdrop-filter-like effects.
+    pub fn push_blur_region(&mut self, bounds: Bounds<Pixels>, sigma: f32) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(BlurRegion {
+            order: 0,
+            bounds: bounds.scale(scale_factor),
+            content_mask,
+            sigma,
+        });
     }
 
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
