@@ -1323,3 +1323,48 @@ kernel void gaussian_blur_vertical(
 
     outTexture.write(result / weightSum, gid);
 }
+
+// 4x box-filter downsample: each output pixel = average of 4x4 input block.
+// Used by the blur pipeline to reduce resolution before gaussian, matching
+// how macOS system blur (NSVisualEffectView) achieves fast performance.
+kernel void blur_downsample_4x(
+    texture2d<float, access::read>  inTexture  [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint2 base = gid * 4;
+    float4 sum = float4(0.0);
+    for (uint dy = 0; dy < 4; dy++) {
+        for (uint dx = 0; dx < 4; dx++) {
+            uint2 coord = uint2(
+                min(base.x + dx, inTexture.get_width() - 1),
+                min(base.y + dy, inTexture.get_height() - 1)
+            );
+            sum += inTexture.read(coord);
+        }
+    }
+    outTexture.write(sum / 16.0, gid);
+}
+
+// 4x bilinear upsample: reconstruct full-res from downscaled blur result.
+kernel void blur_upsample_4x(
+    texture2d<float, access::read>  inTexture  [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    float2 srcCoord = float2(gid) / 4.0;
+    int2 base = int2(floor(srcCoord));
+    float2 frac_val = srcCoord - float2(base);
+
+    int maxX = int(inTexture.get_width()) - 1;
+    int maxY = int(inTexture.get_height()) - 1;
+
+    float4 tl = inTexture.read(uint2(clamp(base.x, 0, maxX), clamp(base.y, 0, maxY)));
+    float4 tr = inTexture.read(uint2(clamp(base.x + 1, 0, maxX), clamp(base.y, 0, maxY)));
+    float4 bl = inTexture.read(uint2(clamp(base.x, 0, maxX), clamp(base.y + 1, 0, maxY)));
+    float4 br = inTexture.read(uint2(clamp(base.x + 1, 0, maxX), clamp(base.y + 1, 0, maxY)));
+
+    float4 top_val = mix(tl, tr, frac_val.x);
+    float4 bot_val = mix(bl, br, frac_val.x);
+    outTexture.write(mix(top_val, bot_val, frac_val.y), gid);
+}
