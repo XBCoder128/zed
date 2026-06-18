@@ -441,16 +441,14 @@ impl MetalRenderer {
         desc.set_width(size.width.0 as u64);
         desc.set_height(size.height.0 as u64);
         self.blur_intermediate = Some(self.device.new_texture(&desc));
-        // 1/4 size textures for downsampled blur (matching macOS perf)
+        // Full-size temp (used for both full-res and downsampled blur passes)
+        self.blur_temp = Some(self.device.new_texture(&desc));
+        // 1/4 size texture for downsampled blur (large sigma optimization)
         let qw = ((size.width.0 as u64) / 4).max(1);
         let qh = ((size.height.0 as u64) / 4).max(1);
         desc.set_width(qw);
         desc.set_height(qh);
-        self.blur_temp = Some(self.device.new_texture(&desc));
         self.blur_downsampled = Some(self.device.new_texture(&desc));
-        // Rebuild cache texture at full size, invalidate
-        desc.set_width(size.width.0 as u64);
-        desc.set_height(size.height.0 as u64);
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -598,17 +596,13 @@ impl MetalRenderer {
         }
     }
     fn blit_and_blur_region(&self, command_buffer: &metal::CommandBufferRef, drawable_texture: &metal::TextureRef, intermediate: &metal::TextureRef, temp: &metal::TextureRef, sigma: f32, x: u64, y: u64, w: u64, h: u64) {
+        // sigma == 0: no blur needed, original framebuffer is already correct.
+        if sigma <= 0.0 {
+            return;
+        }
+
         let Some(ref downsampled) = self.blur_downsampled else { return; };
-        // Downsample approach (matching macOS system blur perf):
-        // 1. Blit padded region → intermediate (full res)
-        // 2. Downsample 4x: intermediate → downsampled
-        // 3. Gaussian blur at sigma/4 on the small texture
-        // 4. Upsample 4x: downsampled → intermediate
-        // 5. Blit result back to drawable
-        //
-        // This reduces gaussian computation by ~64x (16x fewer pixels,
-        // 4x smaller radius). Visual quality is identical because blur
-        // destroys high-frequency detail anyway.
+
         let pad = (3.0 * sigma).ceil() as u64;
         let sx = x.saturating_sub(pad);
         let sy = y.saturating_sub(pad);
@@ -624,59 +618,88 @@ impl MetalRenderer {
             blit.end_encoding();
         }
 
-        // Downsampled dimensions
-        let dw = (sw / 4).max(1);
-        let dh = (sh / 4).max(1);
-        let ds_sigma = (sigma / 4.0).max(1.0);
+        // Small sigma: blur at full resolution to avoid downscale artifacts.
+        // Large sigma: downsample 4x first for ~64x speedup.
+        let use_downsample = sigma >= 8.0;
 
-        // 2. Downsample 4x: intermediate → downsampled
-        {
-            let compute = command_buffer.new_compute_command_encoder();
-            compute.set_compute_pipeline_state(&self.blur_downsample_pipeline);
-            compute.set_texture(0, Some(intermediate));
-            compute.set_texture(1, Some(downsampled));
-            let tw = self.blur_downsample_pipeline.thread_execution_width();
-            let th = self.blur_downsample_pipeline.max_total_threads_per_threadgroup() / tw;
-            compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
-            compute.end_encoding();
-        }
+        if use_downsample {
+            let dw = (sw / 4).max(1);
+            let dh = (sh / 4).max(1);
+            let ds_sigma = (sigma / 4.0).max(1.0);
 
-        // 3. Horizontal gaussian on downsampled texture
-        {
-            let compute = command_buffer.new_compute_command_encoder();
-            compute.set_compute_pipeline_state(&self.blur_horizontal_pipeline);
-            compute.set_texture(0, Some(downsampled));
-            compute.set_texture(1, Some(temp));
-            compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
-            let tw = self.blur_horizontal_pipeline.thread_execution_width();
-            let th = self.blur_horizontal_pipeline.max_total_threads_per_threadgroup() / tw;
-            compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
-            compute.end_encoding();
-        }
+            // 2. Downsample 4x: intermediate → downsampled
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_downsample_pipeline);
+                compute.set_texture(0, Some(intermediate));
+                compute.set_texture(1, Some(downsampled));
+                let tw = self.blur_downsample_pipeline.thread_execution_width();
+                let th = self.blur_downsample_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
 
-        // 4. Vertical gaussian on downsampled texture
-        {
-            let compute = command_buffer.new_compute_command_encoder();
-            compute.set_compute_pipeline_state(&self.blur_vertical_pipeline);
-            compute.set_texture(0, Some(temp));
-            compute.set_texture(1, Some(downsampled));
-            compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
-            let tw = self.blur_vertical_pipeline.thread_execution_width();
-            let th = self.blur_vertical_pipeline.max_total_threads_per_threadgroup() / tw;
-            compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
-            compute.end_encoding();
-        }
+            // 3. Horizontal gaussian on downsampled texture
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_horizontal_pipeline);
+                compute.set_texture(0, Some(downsampled));
+                compute.set_texture(1, Some(temp));
+                compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
+                let tw = self.blur_horizontal_pipeline.thread_execution_width();
+                let th = self.blur_horizontal_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
 
-        // 5. Upsample 4x: downsampled → intermediate (writes at full res)
-        {
-            let compute = command_buffer.new_compute_command_encoder();
-            compute.set_compute_pipeline_state(&self.blur_upsample_pipeline);
-            compute.set_texture(0, Some(downsampled));
-            compute.set_texture(1, Some(intermediate));
-            let tw = self.blur_upsample_pipeline.thread_execution_width();
-            let th = self.blur_upsample_pipeline.max_total_threads_per_threadgroup() / tw;
-            compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
-            compute.end_encoding();
+            // 4. Vertical gaussian on downsampled texture
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_vertical_pipeline);
+                compute.set_texture(0, Some(temp));
+                compute.set_texture(1, Some(downsampled));
+                compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
+                let tw = self.blur_vertical_pipeline.thread_execution_width();
+                let th = self.blur_vertical_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
+
+            // 5. Upsample 4x: downsampled → intermediate (writes at full res)
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_upsample_pipeline);
+                compute.set_texture(0, Some(downsampled));
+                compute.set_texture(1, Some(intermediate));
+                let tw = self.blur_upsample_pipeline.thread_execution_width();
+                let th = self.blur_upsample_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
+        } else {
+            // Full-resolution blur: intermediate → temp → intermediate
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_horizontal_pipeline);
+                compute.set_texture(0, Some(intermediate));
+                compute.set_texture(1, Some(temp));
+                compute.set_bytes(0, std::mem::size_of_val(&sigma) as u64, &sigma as *const f32 as *const _);
+                let tw = self.blur_horizontal_pipeline.thread_execution_width();
+                let th = self.blur_horizontal_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
+            {
+                let compute = command_buffer.new_compute_command_encoder();
+                compute.set_compute_pipeline_state(&self.blur_vertical_pipeline);
+                compute.set_texture(0, Some(temp));
+                compute.set_texture(1, Some(intermediate));
+                compute.set_bytes(0, std::mem::size_of_val(&sigma) as u64, &sigma as *const f32 as *const _);
+                let tw = self.blur_vertical_pipeline.thread_execution_width();
+                let th = self.blur_vertical_pipeline.max_total_threads_per_threadgroup() / tw;
+                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                compute.end_encoding();
+            }
         }
 
         // 6. Blit the blurred region back to drawable
