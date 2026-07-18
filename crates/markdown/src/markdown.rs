@@ -1402,6 +1402,9 @@ impl MarkdownElement {
         width: Option<DefiniteLength>,
         height: Option<DefiniteLength>,
     ) {
+        builder
+            .modify_current_div(|el| el.flex().flex_row().flex_wrap().items_start().max_w_full());
+
         let enclosing_link_url = (builder.link_depth > 0)
             .then(|| builder.rendered_links.last())
             .flatten()
@@ -1409,7 +1412,13 @@ impl MarkdownElement {
         let fallback_opens_image_url = enclosing_link_url.is_none();
 
         let image_element = {
-            let wrapper = div().id(("markdown-image-link", range.start)).min_w_0();
+            // `w_full` (zeda's layout) + upstream's link-click wrapper:
+            // images span the full text width, and clicking one inside a
+            // link navigates to the link target.
+            let wrapper = div()
+                .id(("markdown-image-link", range.start))
+                .min_w_0()
+                .w_full();
             let wrapper = if !self.style.prevent_mouse_interaction
                 && let Some(url) = enclosing_link_url
             {

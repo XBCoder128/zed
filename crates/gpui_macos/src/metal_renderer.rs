@@ -7,9 +7,9 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, BlurRegion, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, Background, BlurRegion, Bounds, ContentMask, DevicePixels, MonochromeSprite,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
+    Size, Surface, Underline, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -133,12 +133,6 @@ pub(crate) struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
-<<<<<<< HEAD
-    /// Offscreen render target reused across `render_scene` calls when
-    /// rendering headlessly without reading pixels back.
-    #[cfg(any(test, feature = "test-support"))]
-    headless_render_target: Option<metal::Texture>,
-=======
     blur_horizontal_pipeline: metal::ComputePipelineState,
     blur_vertical_pipeline: metal::ComputePipelineState,
     blur_downsample_pipeline: metal::ComputePipelineState,
@@ -146,13 +140,10 @@ pub(crate) struct MetalRenderer {
     blur_downsampled: Option<metal::Texture>,
     blur_intermediate: Option<metal::Texture>,
     blur_temp: Option<metal::Texture>,
-<<<<<<< HEAD
-    blur_cache_valid: bool,
-    blur_cache_texture: Option<metal::Texture>,
-    blur_frame_count: u64,
->>>>>>> ce9d304356 (Add blur region support to the scene and implement GPU blur rendering)
-=======
->>>>>>> f578a7786e (Use 4x downsample/upsample blur for faster rendering)
+    /// Offscreen render target reused across `render_scene` calls when
+    /// rendering headlessly without reading pixels back.
+    #[cfg(any(test, feature = "test-support"))]
+    headless_render_target: Option<metal::Texture>,
 }
 
 #[repr(C)]
@@ -343,9 +334,12 @@ impl MetalRenderer {
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 
-        let blur_horizontal_pipeline = build_compute_pipeline(&device, &library, "gaussian_blur_horizontal");
-        let blur_vertical_pipeline = build_compute_pipeline(&device, &library, "gaussian_blur_vertical");
-        let blur_downsample_pipeline = build_compute_pipeline(&device, &library, "blur_downsample_4x");
+        let blur_horizontal_pipeline =
+            build_compute_pipeline(&device, &library, "gaussian_blur_horizontal");
+        let blur_vertical_pipeline =
+            build_compute_pipeline(&device, &library, "gaussian_blur_vertical");
+        let blur_downsample_pipeline =
+            build_compute_pipeline(&device, &library, "blur_downsample_4x");
         let blur_upsample_pipeline = build_compute_pipeline(&device, &library, "blur_upsample_4x");
 
         Self {
@@ -371,10 +365,6 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
-<<<<<<< HEAD
-            #[cfg(any(test, feature = "test-support"))]
-            headless_render_target: None,
-=======
             blur_horizontal_pipeline,
             blur_vertical_pipeline,
             blur_downsample_pipeline,
@@ -382,13 +372,8 @@ impl MetalRenderer {
             blur_downsampled: None,
             blur_intermediate: None,
             blur_temp: None,
-<<<<<<< HEAD
-            blur_cache_valid: false,
-            blur_cache_texture: None,
-            blur_frame_count: 0,
->>>>>>> ce9d304356 (Add blur region support to the scene and implement GPU blur rendering)
-=======
->>>>>>> f578a7786e (Use 4x downsample/upsample blur for faster rendering)
+            #[cfg(any(test, feature = "test-support"))]
+            headless_render_target: None,
         }
     }
 
@@ -432,7 +417,12 @@ impl MetalRenderer {
     }
 
     fn update_blur_textures(&mut self, size: Size<DevicePixels>) {
-        if size.width.0 <= 0 || size.height.0 <= 0 { self.blur_intermediate = None; self.blur_temp = None; self.blur_downsampled = None; return; }
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            self.blur_intermediate = None;
+            self.blur_temp = None;
+            self.blur_downsampled = None;
+            return;
+        }
         let desc = metal::TextureDescriptor::new();
         desc.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
         desc.set_storage_mode(metal::MTLStorageMode::Private);
@@ -577,31 +567,70 @@ impl MetalRenderer {
         }
     }
 
-
-    fn blur_primitives(&mut self, regions: &[BlurRegion], command_buffer: &metal::CommandBufferRef, drawable_texture: &metal::TextureRef, viewport_size: &Size<DevicePixels>) {
-        let Some(ref intermediate) = self.blur_intermediate else { return; };
-        let Some(ref temp) = self.blur_temp else { return; };
+    fn blur_primitives(
+        &mut self,
+        regions: &[BlurRegion],
+        command_buffer: &metal::CommandBufferRef,
+        drawable_texture: &metal::TextureRef,
+        viewport_size: &Size<DevicePixels>,
+    ) {
+        let Some(ref intermediate) = self.blur_intermediate else {
+            return;
+        };
+        let Some(ref temp) = self.blur_temp else {
+            return;
+        };
         for region in regions {
             let x = region.bounds.origin.x.0.max(0.0) as u64;
             let y = region.bounds.origin.y.0.max(0.0) as u64;
             let w = region.bounds.size.width.0.min(viewport_size.width.0 as f32) as u64;
-            let h = region.bounds.size.height.0.min(viewport_size.height.0 as f32) as u64;
-            if w == 0 || h == 0 { continue; }
+            let h = region
+                .bounds
+                .size
+                .height
+                .0
+                .min(viewport_size.height.0 as f32) as u64;
+            if w == 0 || h == 0 {
+                continue;
+            }
             // No cache — with the 4x downsample optimization the gaussian
             // is fast enough to run every frame (~64x cheaper than before).
             // This guarantees blur always reflects the current framebuffer
             // content: no stale texture on first frame, no mismatch when
             // overlays appear/disappear, no black flash on startup.
-            self.blit_and_blur_region(command_buffer, drawable_texture, intermediate, temp, region.sigma, x, y, w, h);
+            self.blit_and_blur_region(
+                command_buffer,
+                drawable_texture,
+                intermediate,
+                temp,
+                region.sigma,
+                x,
+                y,
+                w,
+                h,
+            );
         }
     }
-    fn blit_and_blur_region(&self, command_buffer: &metal::CommandBufferRef, drawable_texture: &metal::TextureRef, intermediate: &metal::TextureRef, temp: &metal::TextureRef, sigma: f32, x: u64, y: u64, w: u64, h: u64) {
+    fn blit_and_blur_region(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        drawable_texture: &metal::TextureRef,
+        intermediate: &metal::TextureRef,
+        temp: &metal::TextureRef,
+        sigma: f32,
+        x: u64,
+        y: u64,
+        w: u64,
+        h: u64,
+    ) {
         // sigma == 0: no blur needed, original framebuffer is already correct.
         if sigma <= 0.0 {
             return;
         }
 
-        let Some(ref downsampled) = self.blur_downsampled else { return; };
+        let Some(ref downsampled) = self.blur_downsampled else {
+            return;
+        };
 
         let pad = (3.0 * sigma).ceil() as u64;
         let sx = x.saturating_sub(pad);
@@ -614,7 +643,21 @@ impl MetalRenderer {
         // 1. Blit padded region from drawable → intermediate
         {
             let blit = command_buffer.new_blit_command_encoder();
-            blit.copy_from_texture(drawable_texture, 0, 0, metal::MTLOrigin { x: sx, y: sy, z: 0 }, metal::MTLSize { width: sw, height: sh, depth: 1 }, intermediate, 0, 0, metal::MTLOrigin { x: 0, y: 0, z: 0 });
+            blit.copy_from_texture(
+                drawable_texture,
+                0,
+                0,
+                metal::MTLOrigin { x: sx, y: sy, z: 0 },
+                metal::MTLSize {
+                    width: sw,
+                    height: sh,
+                    depth: 1,
+                },
+                intermediate,
+                0,
+                0,
+                metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            );
             blit.end_encoding();
         }
 
@@ -634,8 +677,22 @@ impl MetalRenderer {
                 compute.set_texture(0, Some(intermediate));
                 compute.set_texture(1, Some(downsampled));
                 let tw = self.blur_downsample_pipeline.thread_execution_width();
-                let th = self.blur_downsample_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_downsample_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: dw,
+                        height: dh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
 
@@ -645,10 +702,28 @@ impl MetalRenderer {
                 compute.set_compute_pipeline_state(&self.blur_horizontal_pipeline);
                 compute.set_texture(0, Some(downsampled));
                 compute.set_texture(1, Some(temp));
-                compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
+                compute.set_bytes(
+                    0,
+                    std::mem::size_of_val(&ds_sigma) as u64,
+                    &ds_sigma as *const f32 as *const _,
+                );
                 let tw = self.blur_horizontal_pipeline.thread_execution_width();
-                let th = self.blur_horizontal_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_horizontal_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: dw,
+                        height: dh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
 
@@ -658,10 +733,28 @@ impl MetalRenderer {
                 compute.set_compute_pipeline_state(&self.blur_vertical_pipeline);
                 compute.set_texture(0, Some(temp));
                 compute.set_texture(1, Some(downsampled));
-                compute.set_bytes(0, std::mem::size_of_val(&ds_sigma) as u64, &ds_sigma as *const f32 as *const _);
+                compute.set_bytes(
+                    0,
+                    std::mem::size_of_val(&ds_sigma) as u64,
+                    &ds_sigma as *const f32 as *const _,
+                );
                 let tw = self.blur_vertical_pipeline.thread_execution_width();
-                let th = self.blur_vertical_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: dw, height: dh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_vertical_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: dw,
+                        height: dh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
 
@@ -672,8 +765,22 @@ impl MetalRenderer {
                 compute.set_texture(0, Some(downsampled));
                 compute.set_texture(1, Some(intermediate));
                 let tw = self.blur_upsample_pipeline.thread_execution_width();
-                let th = self.blur_upsample_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_upsample_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: sw,
+                        height: sh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
         } else {
@@ -683,10 +790,28 @@ impl MetalRenderer {
                 compute.set_compute_pipeline_state(&self.blur_horizontal_pipeline);
                 compute.set_texture(0, Some(intermediate));
                 compute.set_texture(1, Some(temp));
-                compute.set_bytes(0, std::mem::size_of_val(&sigma) as u64, &sigma as *const f32 as *const _);
+                compute.set_bytes(
+                    0,
+                    std::mem::size_of_val(&sigma) as u64,
+                    &sigma as *const f32 as *const _,
+                );
                 let tw = self.blur_horizontal_pipeline.thread_execution_width();
-                let th = self.blur_horizontal_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_horizontal_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: sw,
+                        height: sh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
             {
@@ -694,10 +819,28 @@ impl MetalRenderer {
                 compute.set_compute_pipeline_state(&self.blur_vertical_pipeline);
                 compute.set_texture(0, Some(temp));
                 compute.set_texture(1, Some(intermediate));
-                compute.set_bytes(0, std::mem::size_of_val(&sigma) as u64, &sigma as *const f32 as *const _);
+                compute.set_bytes(
+                    0,
+                    std::mem::size_of_val(&sigma) as u64,
+                    &sigma as *const f32 as *const _,
+                );
                 let tw = self.blur_vertical_pipeline.thread_execution_width();
-                let th = self.blur_vertical_pipeline.max_total_threads_per_threadgroup() / tw;
-                compute.dispatch_threads(metal::MTLSize { width: sw, height: sh, depth: 1 }, metal::MTLSize { width: tw, height: th, depth: 1 });
+                let th = self
+                    .blur_vertical_pipeline
+                    .max_total_threads_per_threadgroup()
+                    / tw;
+                compute.dispatch_threads(
+                    metal::MTLSize {
+                        width: sw,
+                        height: sh,
+                        depth: 1,
+                    },
+                    metal::MTLSize {
+                        width: tw,
+                        height: th,
+                        depth: 1,
+                    },
+                );
                 compute.end_encoding();
             }
         }
@@ -705,7 +848,21 @@ impl MetalRenderer {
         // 6. Blit the blurred region back to drawable
         {
             let blit = command_buffer.new_blit_command_encoder();
-            blit.copy_from_texture(intermediate, 0, 0, metal::MTLOrigin { x: dx, y: dy, z: 0 }, metal::MTLSize { width: w, height: h, depth: 1 }, drawable_texture, 0, 0, metal::MTLOrigin { x, y, z: 0 });
+            blit.copy_from_texture(
+                intermediate,
+                0,
+                0,
+                metal::MTLOrigin { x: dx, y: dy, z: 0 },
+                metal::MTLSize {
+                    width: w,
+                    height: h,
+                    depth: 1,
+                },
+                drawable_texture,
+                0,
+                0,
+                metal::MTLOrigin { x, y, z: 0 },
+            );
             blit.end_encoding();
         }
     }
@@ -1048,8 +1205,20 @@ impl MetalRenderer {
                 ),
                 PrimitiveBatch::BlurRegions(range) => {
                     command_encoder.end_encoding();
-                    self.blur_primitives(&scene.blur_regions[range], command_buffer, texture, &viewport_size);
-                    command_encoder = new_command_encoder_for_texture(command_buffer, texture, viewport_size, |color_attachment| { color_attachment.set_load_action(metal::MTLLoadAction::Load); });
+                    self.blur_primitives(
+                        &scene.blur_regions[range],
+                        command_buffer,
+                        texture,
+                        &viewport_size,
+                    );
+                    command_encoder = new_command_encoder_for_texture(
+                        command_buffer,
+                        texture,
+                        viewport_size,
+                        |color_attachment| {
+                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                        },
+                    );
                     true
                 }
                 PrimitiveBatch::Quads(range) => self.draw_quads(
@@ -1824,11 +1993,19 @@ fn build_pipeline_state(
         .expect("could not create render pipeline state")
 }
 
-fn build_compute_pipeline(device: &metal::DeviceRef, library: &metal::LibraryRef, kernel_name: &str) -> metal::ComputePipelineState {
-    let kernel = library.get_function(kernel_name, None).unwrap_or_else(|e| panic!("error locating compute kernel {kernel_name}: {e}"));
+fn build_compute_pipeline(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    kernel_name: &str,
+) -> metal::ComputePipelineState {
+    let kernel = library
+        .get_function(kernel_name, None)
+        .unwrap_or_else(|e| panic!("error locating compute kernel {kernel_name}: {e}"));
     let desc = metal::ComputePipelineDescriptor::new();
     desc.set_compute_function(Some(kernel.as_ref()));
-    device.new_compute_pipeline_state(desc.as_ref()).unwrap_or_else(|e| panic!("could not create compute pipeline for {kernel_name}: {e}"))
+    device
+        .new_compute_pipeline_state(desc.as_ref())
+        .unwrap_or_else(|e| panic!("could not create compute pipeline for {kernel_name}: {e}"))
 }
 
 fn build_path_sprite_pipeline_state(
