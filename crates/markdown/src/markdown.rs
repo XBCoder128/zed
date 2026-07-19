@@ -1703,23 +1703,26 @@ impl MarkdownElement {
         range: &Range<usize>,
         markdown_end: usize,
     ) {
+        // Block layout with an absolutely-positioned marker. The previous
+        // h_flex + flex_1 + w_0 row made shrink-to-fit containers measure the
+        // item's content at min-content width, collapsing the parent to the
+        // marker width and wrapping the text into a one-char column.
         builder.push_div(
             div()
                 .when(!self.style.height_is_multiple_of_line_height, |el| {
-                    el.mb_1().gap_1().line_height(rems(1.3))
+                    el.mb_1().line_height(rems(1.3))
                 })
-                .h_flex()
-                .items_start()
-                .child(bullet),
+                .w_full()
+                .min_w_0()
+                .relative()
+                .pl(rems(1.5))
+                .child(div().absolute().top(px(0.)).left(px(0.)).child(bullet)),
             range,
             markdown_end,
         );
-        // Without `w_0`, text doesn't wrap to the width of the container.
-        builder.push_div(div().flex_1().w_0(), range, markdown_end);
     }
 
     fn pop_markdown_list_item(&self, builder: &mut MarkdownElementBuilder) {
-        builder.pop_div();
         builder.pop_div();
     }
 
@@ -2353,7 +2356,11 @@ impl Element for MarkdownElement {
                         }
                         MarkdownTag::List(bullet_index) => {
                             builder.push_list(*bullet_index);
-                            builder.push_div(div().pl_2p5(), range, markdown_end);
+                            builder.push_div(
+                                div().w_full().min_w_0().pl_2p5(),
+                                range,
+                                markdown_end,
+                            );
                         }
                         MarkdownTag::Item => {
                             let bullet =
@@ -2446,6 +2453,8 @@ impl Element for MarkdownElement {
                                     .mb_1()
                                     .line_height(rems(1.3))
                                     .text_size(rems(0.85))
+                                    .w_full()
+                                    .min_w_0()
                                     .h_flex()
                                     .items_start()
                                     .gap_2()
@@ -2455,7 +2464,7 @@ impl Element for MarkdownElement {
                                 range,
                                 markdown_end,
                             );
-                            builder.push_div(div().flex_1().w_0(), range, markdown_end);
+                            builder.push_div(div().flex_1().min_w_0().w_0(), range, markdown_end);
                         }
                         MarkdownTag::MetadataBlock(_) => {
                             if let Some(metadata_block) =
@@ -4109,6 +4118,207 @@ mod tests {
                 theme_settings::init(theme::LoadThemes::JustBase, cx);
             }
         });
+    }
+
+    // Regression tests for chat-bubble style containers: wrapping text inside
+    // shrink-to-fit and max-width-clamped boxes. Zeda's AI panel hit both
+    // failure modes below; keep these close to the real container chain.
+
+    fn bubble_test_style(font_size: f32) -> MarkdownStyle {
+        MarkdownStyle {
+            base_text_style: gpui::TextStyle {
+                font_size: px(font_size).into(),
+                ..Default::default()
+            },
+            container_style: gpui::StyleRefinement::default()
+                .text_size(px(font_size))
+                .w_full()
+                .min_w(px(0.))
+                .overflow_x_hidden(),
+            ..Default::default()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum BubbleWidth {
+        /// Shrink-to-fit with a `max_w(relative(0.92))` clamp.
+        Hug,
+        /// `w(relative(fraction))` — used by Zeda for tables / fenced code.
+        Fraction(f32),
+        /// `w_full()` + `max_w(relative(fraction))`. Taffy measures this
+        /// box's content height at the *unclamped* style width and never
+        /// re-measures after clamping, under-reporting the height whenever
+        /// the clamp engages and the content wraps. Kept as a reference
+        /// mode so the quirk stays documented by a test.
+        FullWithMaxClamp(f32),
+    }
+
+    /// Lays out `markdown` in a fixed-width column (chat-panel-like padding),
+    /// inside a bubble with horizontal padding. Returns the bubble's size and
+    /// the markdown root's size.
+    fn draw_bubble(
+        markdown: &Entity<Markdown>,
+        style: &MarkdownStyle,
+        width: BubbleWidth,
+        panel_width: f32,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (gpui::Size<gpui::Pixels>, gpui::Size<gpui::Pixels>) {
+        let style = style.clone();
+        cx.draw(
+            Default::default(),
+            size(px(panel_width), px(2000.0)),
+            |_, cx| {
+                div()
+                    .size_full()
+                    .child(
+                        div().w_full().px(px(20.)).py(px(12.)).child(
+                            div().flex().flex_col().w_full().items_start().child(
+                                div()
+                                    .debug_selector(|| "bubble".into())
+                                    .min_w(px(0.))
+                                    .when_some(
+                                        match width {
+                                            BubbleWidth::Fraction(f) => Some(f),
+                                            _ => None,
+                                        },
+                                        |d, f| d.w(relative(f)),
+                                    )
+                                    .when(matches!(width, BubbleWidth::Hug), |d| {
+                                        d.max_w(relative(0.92))
+                                    })
+                                    .when(matches!(width, BubbleWidth::FullWithMaxClamp(_)), |d| {
+                                        d.w_full()
+                                    })
+                                    .when_some(
+                                        match width {
+                                            BubbleWidth::FullWithMaxClamp(f) => Some(f),
+                                            _ => None,
+                                        },
+                                        |d, f| d.max_w(relative(f)),
+                                    )
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .child(
+                                        MarkdownElement::new(markdown.clone(), style.clone())
+                                            .code_block_renderer(CodeBlockRenderer::Default {
+                                                copy_button_visibility:
+                                                    CopyButtonVisibility::Hidden,
+                                                wrap_button_visibility:
+                                                    WrapButtonVisibility::Hidden,
+                                                border: false,
+                                            }),
+                                    ),
+                            ),
+                        ),
+                    )
+                    .into_any_element()
+            },
+        );
+        (
+            cx.debug_bounds("bubble").unwrap().size,
+            cx.debug_bounds("inner").unwrap().size,
+        )
+    }
+
+    /// The bubble must contain the markdown root (16px vertical padding).
+    fn bubble_height_deficit(
+        bubble: gpui::Size<gpui::Pixels>,
+        inner: gpui::Size<gpui::Pixels>,
+    ) -> f32 {
+        f32::from(inner.height) + 16.0 - f32::from(bubble.height)
+    }
+
+    const TABLE_MESSAGE: &str = "完成！已经用中文写入了精简版 `memory.md`（约 1.3KB）。\n\n## 写入了什么 & 筛选逻辑\n\n| 板块 | 写入内容 | 为什么放进来 |\n|------|---------|------------|\n| 🧑 用户身份 | 花名/姓名/工号 + Dima 空间ID | 每次创建需求、查文档、ssh 都可能用到 |\n| 🖥 环境机器速览 | 8台机器的表格，一列核心用途一列备注 | 每次要连机器时快速定位该用哪台 |\n| 📚 核心知识库 | 内部(94篇) + 对外(4个算法) 的语雀URL | 查找资料时的快捷入口 |\n| 🔩 NPU关键信息 | 型号、设备路径、环境变量、监控命令、架构注意 | 日常工作核心，高频查阅 |\n| 📦 常用交付规范 | 三件套、跨架构 pull、OSS传输限制 | 交付时反复用到 |\n\n## 刻意排除的内容\n\n一些细节保留在 Memory MCP 知识图谱中，不塞进 memory.md（避免过长、降低每次注入的开销）：\n\n- 具体机器的 IP/SSH 配置 → 知识图谱里有，需要时搜 `search_nodes`\n- 容器非特权模式启动细节 → 常见的操作，需要时查图谱\n- 知识库的完整目录结构 → 太长了，需要时搜索语雀\n- 交付文档模板的详细板块 → 需要时查语雀文档\n- 每台机器的详细观测点 → 图谱里都有\n\n以后如果发现高频使用的新知识点，随时告诉我，我补充进去。";
+
+    #[gpui::test]
+    fn test_bubble_contains_wrapping_content_across_widths(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_window, cx) = cx.add_window_view(|_, _| TestWindow);
+        let style = bubble_test_style(13.0);
+        let markdown = cx.new(|cx| Markdown::new(TABLE_MESSAGE.into(), None, None, cx));
+        cx.run_until_parked();
+
+        let mut panel = 300.0_f32;
+        while panel <= 620.0 {
+            for mode in [BubbleWidth::Hug, BubbleWidth::Fraction(0.92)] {
+                let (bubble, inner) = draw_bubble(&markdown, &style, mode, panel, cx);
+                assert!(
+                    bubble_height_deficit(bubble, inner) <= 1.0,
+                    "panel={panel} mode={mode:?}: bubble={bubble:?} does not contain inner={inner:?}"
+                );
+            }
+            panel += 2.0;
+        }
+    }
+
+    #[gpui::test]
+    fn test_list_items_do_not_collapse_in_shrink_to_fit(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_window, cx) = cx.add_window_view(|_, _| TestWindow);
+        let style = bubble_test_style(13.0);
+        // Flex-row list items (h_flex + flex_1 + w_0) used to collapse the
+        // bubble to the marker width; block layout must keep it sane.
+        let sources = [
+            "1. 首先检查终端的当前运行状态确认所有任务都已完成然后再继续进行下一步操作\n2. 然后清理临时文件和缓存数据释放磁盘空间提升整体性能\n3. 最后重启相关服务确保配置更改已经生效并且运行稳定可靠\n",
+            "- run `cargo build --release` and then check the output binary size carefully\n- inspect `~/.config/zeda/settings.json` for any stale or invalid configuration values\n",
+        ];
+        for source in sources {
+            let markdown = cx.new(|cx| Markdown::new(source.into(), None, None, cx));
+            cx.run_until_parked();
+            let (bubble, inner) = draw_bubble(&markdown, &style, BubbleWidth::Hug, 420.0, cx);
+            assert!(
+                f32::from(bubble.width) > 200.0,
+                "bubble collapsed: {bubble:?} for {source:?}"
+            );
+            assert!(
+                bubble_height_deficit(bubble, inner) <= 1.0,
+                "bubble={bubble:?} does not contain inner={inner:?} for {source:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn test_max_width_clamp_does_not_undereport_height(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_window, cx) = cx.add_window_view(|_, _| TestWindow);
+        let style = bubble_test_style(13.0);
+        let source = "完成！已经用中文写入了精简版 `memory.md`（约 1.3KB）。\n\n一些细节保留在 Memory MCP 知识图谱中，不塞进 memory.md（避免过长、降低每次注入的开销），这一段文字足够长，在气泡宽度下必然会自动换行，用于验证高度计算是否准确可靠。\n\n以后如果发现高频使用的新知识点，随时告诉我，我补充进去。";
+        let markdown = cx.new(|cx| Markdown::new(source.into(), None, None, cx));
+        cx.run_until_parked();
+
+        // The clamped-at-0.92 box must report the same height as an explicit
+        // pixel box of the resulting width — both wrap identically.
+        let (frac_bubble, frac_inner) =
+            draw_bubble(&markdown, &style, BubbleWidth::Fraction(0.92), 300.0, cx);
+        assert!(
+            bubble_height_deficit(frac_bubble, frac_inner) <= 1.0,
+            "w(relative) bubble={frac_bubble:?} does not contain inner={frac_inner:?}"
+        );
+
+        // Documented Taffy quirk: w_full + max_w may under-report (never
+        // *over*-report). If a future Taffy release fixes it, both heights
+        // become equal and this assertion still holds.
+        let (clamped_bubble, _) = draw_bubble(
+            &markdown,
+            &style,
+            BubbleWidth::FullWithMaxClamp(0.92),
+            300.0,
+            cx,
+        );
+        assert!(
+            f32::from(clamped_bubble.height) <= f32::from(frac_bubble.height) + 1.0,
+            "clamped={clamped_bubble:?} over-reports vs fraction={frac_bubble:?}"
+        );
+    }
+
+    impl std::fmt::Debug for BubbleWidth {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                BubbleWidth::Hug => write!(f, "Hug"),
+                BubbleWidth::Fraction(fr) => write!(f, "Fraction({fr})"),
+                BubbleWidth::FullWithMaxClamp(fr) => write!(f, "FullWithMaxClamp({fr})"),
+            }
+        }
     }
 
     #[gpui::test]
