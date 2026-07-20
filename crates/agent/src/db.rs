@@ -121,6 +121,11 @@ pub struct DbSandboxGrants {
 pub struct SerializedScrollPosition {
     pub item_ix: usize,
     pub offset_in_item: f32,
+    /// Whether the thread view was scrolled to the end when this position was
+    /// recorded. Positions saved before this field existed default to `false`
+    /// and are restored as-is.
+    #[serde(default)]
+    pub at_end: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1214,6 +1219,7 @@ mod tests {
         thread.ui_scroll_position = Some(SerializedScrollPosition {
             item_ix: 42,
             offset_in_item: 13.5,
+            at_end: true,
         });
 
         database
@@ -1232,5 +1238,6 @@ mod tests {
             .expect("scroll_position should be restored");
         assert_eq!(scroll.item_ix, 42);
         assert!((scroll.offset_in_item - 13.5).abs() < f32::EPSILON);
+        assert!(scroll.at_end);
     }
 }

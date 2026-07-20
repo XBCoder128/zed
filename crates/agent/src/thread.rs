@@ -7,7 +7,7 @@ use crate::{
     TerminalTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
     decide_permission_from_settings,
 };
-use acp_thread::{ClientUserMessageId, MentionUri};
+use acp_thread::{ClientUserMessageId, MentionUri, UiScrollPosition};
 use action_log::ActionLog;
 use agent_settings::UserAgentsMd;
 
@@ -1263,7 +1263,7 @@ pub struct Thread {
     subagent_context: Option<SubagentContext>,
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp::ContentBlock>>,
-    ui_scroll_position: Option<gpui::ListOffset>,
+    ui_scroll_position: Option<UiScrollPosition>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
     inherits_parent_model_settings: bool,
@@ -1779,9 +1779,12 @@ impl Thread {
             prompt_capabilities_rx,
             subagent_context: db_thread.subagent_context,
             draft_prompt: db_thread.draft_prompt,
-            ui_scroll_position: db_thread.ui_scroll_position.map(|sp| gpui::ListOffset {
-                item_ix: sp.item_ix,
-                offset_in_item: gpui::px(sp.offset_in_item),
+            ui_scroll_position: db_thread.ui_scroll_position.map(|sp| UiScrollPosition {
+                offset: gpui::ListOffset {
+                    item_ix: sp.item_ix,
+                    offset_in_item: gpui::px(sp.offset_in_item),
+                },
+                at_end: sp.at_end,
             }),
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
@@ -1878,10 +1881,11 @@ impl Thread {
             thinking_enabled: self.thinking_enabled,
             thinking_effort: self.thinking_effort.clone(),
             draft_prompt: self.draft_prompt.clone(),
-            ui_scroll_position: self.ui_scroll_position.map(|lo| {
+            ui_scroll_position: self.ui_scroll_position.map(|position| {
                 crate::db::SerializedScrollPosition {
-                    item_ix: lo.item_ix,
-                    offset_in_item: lo.offset_in_item.as_f32(),
+                    item_ix: position.offset.item_ix,
+                    offset_in_item: position.offset.offset_in_item.as_f32(),
+                    at_end: position.at_end,
                 }
             }),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
@@ -1935,11 +1939,11 @@ impl Thread {
         self.draft_prompt = prompt;
     }
 
-    pub fn ui_scroll_position(&self) -> Option<gpui::ListOffset> {
+    pub fn ui_scroll_position(&self) -> Option<UiScrollPosition> {
         self.ui_scroll_position
     }
 
-    pub fn set_ui_scroll_position(&mut self, position: Option<gpui::ListOffset>) {
+    pub fn set_ui_scroll_position(&mut self, position: Option<UiScrollPosition>) {
         self.ui_scroll_position = position;
     }
 

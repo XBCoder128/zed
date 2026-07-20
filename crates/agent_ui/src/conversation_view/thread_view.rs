@@ -643,6 +643,10 @@ pub struct ThreadView {
     dismissed_skill_loading_issues: HashSet<SkillLoadingIssue>,
     pub(crate) thread_search_bar: Option<Entity<super::thread_search_bar::ThreadSearchBar>>,
     pub(crate) thread_search_visible: bool,
+    /// Whether to show the floating "scroll to bottom" button. Tracks whether
+    /// the user has scrolled away from the end of the thread; updated from the
+    /// list's scroll handler and from programmatic jump actions.
+    show_scroll_to_bottom: bool,
 }
 impl Focusable for ThreadView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -971,6 +975,10 @@ impl ThreadView {
             }));
         }));
 
+        // If a mid-thread scroll position was restored, follow-tail has been
+        // disengaged and the "scroll to bottom" button should be shown.
+        let show_scroll_to_bottom = list_state.item_count() > 0 && !list_state.is_following_tail();
+
         let mut this = Self {
             root_thread_id,
             session_id,
@@ -1041,6 +1049,7 @@ impl ThreadView {
             dismissed_skill_loading_issues: HashSet::default(),
             thread_search_bar: None,
             thread_search_visible: false,
+            show_scroll_to_bottom,
         };
 
         this.sync_generating_indicator(cx);
@@ -1050,9 +1059,13 @@ impl ThreadView {
         let thread_view = cx.entity().downgrade();
 
         this.list_state
-            .set_scroll_handler(move |_event, _window, cx| {
+            .set_scroll_handler(move |event, _window, cx| {
                 let list_state = list_state_for_scroll.clone();
                 let thread_view = thread_view.clone();
+                // Record whether the scroll landed at the end of the thread, so
+                // that restoring the position later can snap back to the end
+                // instead of getting stuck partway through.
+                let at_end = event.is_following_tail || event.visible_range.end >= event.count;
                 // N.B. We must defer because the scroll handler is called while the
                 // ListState's RefCell is mutably borrowed. Reading logical_scroll_top()
                 // directly would panic from a double borrow.
@@ -1061,9 +1074,13 @@ impl ThreadView {
                     let _ = thread_view.update(cx, |this, cx| {
                         if let Some(thread) = this.as_native_thread(cx) {
                             thread.update(cx, |thread, _cx| {
-                                thread.set_ui_scroll_position(Some(scroll_top));
+                                thread.set_ui_scroll_position(Some(acp_thread::UiScrollPosition {
+                                    offset: scroll_top,
+                                    at_end,
+                                }));
                             });
                         }
+                        this.set_scrolled_away_from_end(!at_end, cx);
                         this.schedule_save(cx);
                     });
                 });
@@ -1689,8 +1706,7 @@ impl ThreadView {
             })?;
 
             let _ = this.update(cx, |this, cx| {
-                this.list_state.scroll_to_end();
-                cx.notify();
+                this.scroll_to_end(cx);
             });
 
             let _stop_turn = defer({
@@ -6037,6 +6053,36 @@ impl ThreadView {
         .flex_grow_1()
     }
 
+    fn render_scroll_to_bottom_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .absolute()
+            .bottom_2()
+            .left_0()
+            .w_full()
+            .justify_center()
+            .child(
+                Button::new("scroll-to-bottom", "Scroll to Bottom")
+                    .style(ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .start_icon(
+                        Icon::new(IconName::ArrowDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .key_binding(
+                        KeyBinding::for_action_in(
+                            &ScrollOutputToBottom,
+                            &self.focus_handle(cx),
+                            cx,
+                        )
+                        .map(|kb| kb.size(rems_from_px(12.))),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.scroll_to_end(cx);
+                    })),
+            )
+    }
+
     fn render_entry(
         &self,
         entry_ix: usize,
@@ -6857,7 +6903,15 @@ impl ThreadView {
 
     pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
         self.list_state.scroll_to_end();
+        self.set_scrolled_away_from_end(false, cx);
         cx.notify();
+    }
+
+    fn set_scrolled_away_from_end(&mut self, scrolled_away: bool, cx: &mut Context<Self>) {
+        if self.show_scroll_to_bottom != scrolled_away {
+            self.show_scroll_to_bottom = scrolled_away;
+            cx.notify();
+        }
     }
 
     fn handle_feedback_click(
@@ -6879,7 +6933,17 @@ impl ThreadView {
 
     pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         self.list_state.scroll_to(ListOffset::default());
+        self.sync_scroll_to_bottom_visibility(cx);
         cx.notify();
+    }
+
+    /// Recompute the floating "scroll to bottom" button's visibility from the
+    /// list's geometry after programmatic scrolls that don't go through the
+    /// list's scroll handler (keyboard paging, jump actions).
+    fn sync_scroll_to_bottom_visibility(&mut self, cx: &mut Context<Self>) {
+        let at_end = self.list_state.is_following_tail()
+            || self.list_state.is_scrolled_to_end().unwrap_or(false);
+        self.set_scrolled_away_from_end(!at_end, cx);
     }
 
     fn scroll_output_page_up(
@@ -6890,6 +6954,7 @@ impl ThreadView {
     ) {
         let page_height = self.list_state.viewport_bounds().size.height;
         self.list_state.scroll_by(-page_height * 0.9);
+        self.sync_scroll_to_bottom_visibility(cx);
         cx.notify();
     }
 
@@ -6901,6 +6966,7 @@ impl ThreadView {
     ) {
         let page_height = self.list_state.viewport_bounds().size.height;
         self.list_state.scroll_by(page_height * 0.9);
+        self.sync_scroll_to_bottom_visibility(cx);
         cx.notify();
     }
 
@@ -6911,6 +6977,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         self.list_state.scroll_by(-window.line_height() * 3.);
+        self.sync_scroll_to_bottom_visibility(cx);
         cx.notify();
     }
 
@@ -6921,6 +6988,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         self.list_state.scroll_by(window.line_height() * 3.);
+        self.sync_scroll_to_bottom_visibility(cx);
         cx.notify();
     }
 
@@ -6958,6 +7026,7 @@ impl ThreadView {
                 item_ix: target_ix,
                 offset_in_item: px(0.),
             });
+            self.sync_scroll_to_bottom_visibility(cx);
             cx.notify();
         }
     }
@@ -6977,6 +7046,7 @@ impl ThreadView {
                 item_ix: target_ix,
                 offset_in_item: px(0.),
             });
+            self.sync_scroll_to_bottom_visibility(cx);
             cx.notify();
         }
     }
@@ -11837,6 +11907,13 @@ impl Render for ThreadView {
         let has_messages = self.list_state.item_count() > 0;
         let list_state = self.list_state.clone();
 
+        // Scroll interactions that bypass the list's scroll handler (e.g.
+        // dragging the scrollbar to the end) can re-engage follow-tail without
+        // updating this flag, so keep it in sync here.
+        if self.show_scroll_to_bottom && self.list_state.is_following_tail() {
+            self.show_scroll_to_bottom = false;
+        }
+
         let conversation = v_flex()
             .when(self.resumed_without_history, |this| {
                 this.child(Self::render_resume_notice(cx))
@@ -11845,7 +11922,11 @@ impl Render for ThreadView {
                 if has_messages {
                     this.flex_1()
                         .size_full()
+                        .relative()
                         .child(self.render_entries(cx))
+                        .when(self.show_scroll_to_bottom, |this| {
+                            this.child(self.render_scroll_to_bottom_button(cx))
+                        })
                         .vertical_scrollbar_for(&list_state, window, cx)
                         .into_any()
                 } else {

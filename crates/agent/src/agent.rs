@@ -6386,9 +6386,12 @@ mod internal_tests {
             thread.set_draft_prompt(Some(draft_blocks.clone()), cx);
         });
         thread.update(cx, |thread, _cx| {
-            thread.set_ui_scroll_position(Some(gpui::ListOffset {
-                item_ix: 5,
-                offset_in_item: gpui::px(12.5),
+            thread.set_ui_scroll_position(Some(acp_thread::UiScrollPosition {
+                offset: gpui::ListOffset {
+                    item_ix: 5,
+                    offset_in_item: gpui::px(12.5),
+                },
+                at_end: false,
             }));
         });
 
@@ -6451,8 +6454,9 @@ mod internal_tests {
             let scroll = thread
                 .ui_scroll_position()
                 .expect("scroll position should be restored after reload");
-            assert_eq!(scroll.item_ix, 5);
-            assert_eq!(scroll.offset_in_item, gpui::px(12.5));
+            assert_eq!(scroll.offset.item_ix, 5);
+            assert_eq!(scroll.offset.offset_in_item, gpui::px(12.5));
+            assert!(!scroll.at_end);
         });
     }
 

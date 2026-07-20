@@ -1277,10 +1277,13 @@ impl ConversationView {
             );
         });
 
-        if let Some(scroll_position) = thread.read(cx).ui_scroll_position() {
-            list_state.scroll_to(scroll_position);
-        } else {
-            list_state.scroll_to_end();
+        match thread.read(cx).ui_scroll_position() {
+            // Positions recorded while scrolled to the end snap back to the
+            // end (keeping follow-tail engaged) so the view can't get stuck
+            // partway through the thread when it has grown since. Positions
+            // recorded while scrolled up are restored as-is.
+            Some(position) if !position.at_end => list_state.scroll_to(position.offset),
+            _ => list_state.scroll_to_end(),
         }
 
         AgentDiff::set_active_thread(&self.workspace, thread.clone(), window, cx);
@@ -5569,6 +5572,127 @@ pub(crate) mod tests {
         cx.run_until_parked();
         active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
             assert_thread_list_item_count_matches_entries(view, cx);
+        });
+    }
+
+    #[derive(Clone)]
+    struct ScrollRestoreConnection {
+        at_end: bool,
+    }
+
+    impl ScrollRestoreConnection {
+        const SESSION_ID: &'static str = "scroll-restore-session";
+        const ENTRY_COUNT: usize = 6;
+    }
+
+    impl AgentConnection for ScrollRestoreConnection {
+        fn agent_id(&self) -> AgentId {
+            AgentId::new("scroll-restore")
+        }
+
+        fn telemetry_id(&self) -> SharedString {
+            "scroll-restore".into()
+        }
+
+        fn new_session(
+            self: Rc<Self>,
+            project: Entity<Project>,
+            _work_dirs: PathList,
+            cx: &mut App,
+        ) -> Task<gpui::Result<Entity<AcpThread>>> {
+            let thread = build_test_thread(
+                self.clone(),
+                project,
+                "ScrollRestoreConnection",
+                acp::SessionId::new(Self::SESSION_ID),
+                cx,
+            );
+            thread.update(cx, |thread, cx| {
+                for ix in 0..Self::ENTRY_COUNT / 2 {
+                    thread.push_user_content_block(
+                        None,
+                        acp::ContentBlock::Text(acp::TextContent::new(format!("message {ix}"))),
+                        cx,
+                    );
+                    thread.push_assistant_content_block(
+                        acp::ContentBlock::Text(acp::TextContent::new("response")),
+                        false,
+                        cx,
+                    );
+                }
+                thread.set_ui_scroll_position(Some(acp_thread::UiScrollPosition {
+                    offset: ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.),
+                    },
+                    at_end: self.at_end,
+                }));
+            });
+            Task::ready(Ok(thread))
+        }
+
+        fn auth_methods(&self) -> &[acp::AuthMethod] {
+            &[]
+        }
+
+        fn authenticate(
+            &self,
+            _method_id: acp::AuthMethodId,
+            _cx: &mut App,
+        ) -> Task<gpui::Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn prompt(
+            &self,
+            _params: acp::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<gpui::Result<acp::PromptResponse>> {
+            Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+        }
+
+        fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {}
+
+        fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+            self
+        }
+    }
+
+    #[gpui::test]
+    async fn test_scroll_position_recorded_at_end_snaps_back_to_end(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = ScrollRestoreConnection { at_end: true };
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+
+        active_thread(&conversation_view, cx).read_with(cx, |view, _cx| {
+            assert!(
+                view.list_state.is_following_tail(),
+                "a position recorded at the end must keep follow-tail engaged"
+            );
+            let scroll_top = view.list_state.logical_scroll_top();
+            assert_eq!(scroll_top.item_ix, ScrollRestoreConnection::ENTRY_COUNT);
+            assert_eq!(scroll_top.offset_in_item, px(0.));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_scroll_position_recorded_mid_thread_is_restored(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = ScrollRestoreConnection { at_end: false };
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+
+        active_thread(&conversation_view, cx).read_with(cx, |view, _cx| {
+            assert!(
+                !view.list_state.is_following_tail(),
+                "a mid-thread position must not engage follow-tail"
+            );
+            let scroll_top = view.list_state.logical_scroll_top();
+            assert_eq!(scroll_top.item_ix, 0);
+            assert_eq!(scroll_top.offset_in_item, px(0.));
         });
     }
 

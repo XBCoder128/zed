@@ -926,8 +926,11 @@ impl StateInner {
             self.follow_state.stop_following();
         }
 
+        // Report the range visible after the scroll was applied, rather
+        // than the pre-scroll range.
+        let scroll_top = self.logical_scroll_top();
+        let visible_range = Self::visible_range(&self.items, height, &scroll_top);
         if let Some(handler) = self.scroll_handler.as_mut() {
-            let visible_range = Self::visible_range(&self.items, height, scroll_top);
             handler(
                 &ListScrollEvent {
                     visible_range,
@@ -1701,7 +1704,7 @@ impl sum_tree::SeekTarget<'_, ListItemSummary, ListItemSummary> for Height {
 mod test {
 
     use gpui::{ScrollDelta, ScrollWheelEvent};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use crate::{
@@ -2369,6 +2372,54 @@ mod test {
             !state.is_following_tail(),
             "follow-tail should disengage when the user scrolls toward the start"
         );
+    }
+
+    #[gpui::test]
+    fn test_scroll_event_reports_post_scroll_visible_range(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+
+        // 10 items × 50px = 500px total, 200px viewport (4 items visible).
+        let state = ListState::new(10, crate::ListAlignment::Top, px(0.)).measure_all();
+
+        struct TestView(ListState);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(50.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = events.clone();
+        state.set_scroll_handler(move |event, _, _| {
+            events_clone
+                .borrow_mut()
+                .push((event.visible_range.clone(), event.count));
+        });
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView(state.clone())).into_any_element()
+        });
+
+        // Scroll down by one item. The reported range must reflect the
+        // position after the scroll was applied (items 1..5), not the
+        // pre-scroll range (items 0..4).
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
+            ..Default::default()
+        });
+
+        let (visible_range, count) = events
+            .borrow()
+            .last()
+            .cloned()
+            .expect("expected a scroll event");
+        assert_eq!(visible_range, 1..5);
+        assert_eq!(count, 10);
     }
 
     #[gpui::test]

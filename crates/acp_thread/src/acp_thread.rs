@@ -2075,6 +2075,18 @@ struct RunningTurn {
     send_task: Task<()>,
 }
 
+/// The scroll position of a thread view, along with whether the view was
+/// scrolled to the end of the thread when the position was recorded.
+///
+/// `at_end` lets a freshly-created view distinguish "the user was following
+/// the tail" (snap to the end, even if the thread has grown since) from "the
+/// user had scrolled up to a specific entry" (restore that entry).
+#[derive(Debug, Clone, Copy)]
+pub struct UiScrollPosition {
+    pub offset: gpui::ListOffset,
+    pub at_end: bool,
+}
+
 pub struct AcpThread {
     session_id: acp::SessionId,
     work_dirs: Option<PathList>,
@@ -2104,7 +2116,7 @@ pub struct AcpThread {
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp::ContentBlock>>,
     /// The initial scroll position for the thread view, set during session registration.
-    ui_scroll_position: Option<gpui::ListOffset>,
+    ui_scroll_position: Option<UiScrollPosition>,
     /// Buffer for smooth text streaming. Holds text that has been received from
     /// the model but not yet revealed in the UI. A timer task drains this buffer
     /// gradually to create a fluid typing effect instead of choppy chunk-at-a-time
@@ -2349,11 +2361,11 @@ impl AcpThread {
         self.draft_prompt = prompt;
     }
 
-    pub fn ui_scroll_position(&self) -> Option<gpui::ListOffset> {
+    pub fn ui_scroll_position(&self) -> Option<UiScrollPosition> {
         self.ui_scroll_position
     }
 
-    pub fn set_ui_scroll_position(&mut self, position: Option<gpui::ListOffset>) {
+    pub fn set_ui_scroll_position(&mut self, position: Option<UiScrollPosition>) {
         self.ui_scroll_position = position;
     }
 
